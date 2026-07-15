@@ -5,7 +5,8 @@ Supported TSL properties (TG7100C):
   - LightSwitch      bool  0/1
   - Brightness       int   1-100
   - ColorTemperature int   0-100  (0=warm 2700K, 100=cool 6500K)
-  - LightMode        enum  0=white 1=color (only white supported on this model)
+  - LightMode        enum  0=white 1=color
+  - HSVColor         struct {Hue:0-360, Saturation:0-100, Value:0-100}
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from typing import Any
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_HS_COLOR,
     ColorMode,
     LightEntity,
 )
@@ -34,6 +36,7 @@ from .const import (
     KELVIN_WARM,
     PROP_BRIGHTNESS,
     PROP_COLOR_TEMP,
+    PROP_HSV_COLOR,
     PROP_LIGHT_MODE,
     PROP_SWITCH,
     SCAN_INTERVAL_SECONDS,
@@ -82,8 +85,7 @@ class AigostarLight(LightEntity):
 
     _attr_has_entity_name = True
     _attr_name = None  # Use device name as entity name
-    _attr_supported_color_modes = {ColorMode.COLOR_TEMP}
-    _attr_color_mode            = ColorMode.COLOR_TEMP
+    _attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.HS}
     _attr_min_color_temp_kelvin = KELVIN_WARM
     _attr_max_color_temp_kelvin = KELVIN_COOL
 
@@ -109,6 +111,8 @@ class AigostarLight(LightEntity):
         self._is_on:        bool = False
         self._brightness:   int  = 255
         self._color_temp_k: int  = 4000
+        self._color_mode:   ColorMode = ColorMode.COLOR_TEMP
+        self._hs_color:     tuple[float, float] = (0.0, 0.0)
         self._available:    bool = online
 
     def update_token(self, new_token: str) -> None:
@@ -157,6 +161,14 @@ class AigostarLight(LightEntity):
         return self._color_temp_k
 
     @property
+    def color_mode(self) -> ColorMode:
+        return self._color_mode
+
+    @property
+    def hs_color(self) -> tuple[float, float]:
+        return self._hs_color
+
+    @property
     def available(self) -> bool:
         return self._available
 
@@ -167,7 +179,18 @@ class AigostarLight(LightEntity):
     def _apply_props(self, props: dict) -> None:
         if PROP_SWITCH in props:
             self._is_on = bool(props[PROP_SWITCH])
-        if PROP_BRIGHTNESS in props:
+        mode = int(props.get(PROP_LIGHT_MODE, 0))
+        self._color_mode = ColorMode.HS if mode == 1 else ColorMode.COLOR_TEMP
+
+        hsv = props.get(PROP_HSV_COLOR)
+        if isinstance(hsv, dict):
+            hue = max(0.0, min(360.0, float(hsv.get("Hue", 0))))
+            saturation = max(0.0, min(100.0, float(hsv.get("Saturation", 0))))
+            self._hs_color = (hue, saturation)
+
+        if self._color_mode == ColorMode.HS and isinstance(hsv, dict):
+            self._brightness = self._aigo_to_ha_brightness(int(hsv.get("Value", 100)))
+        elif PROP_BRIGHTNESS in props:
             self._brightness = self._aigo_to_ha_brightness(int(props[PROP_BRIGHTNESS]))
         if PROP_COLOR_TEMP in props:
             self._color_temp_k = self._aigo_to_kelvin(int(props[PROP_COLOR_TEMP]))
@@ -188,10 +211,33 @@ class AigostarLight(LightEntity):
     def turn_on(self, **kwargs: Any) -> None:
         try:
             items: dict[str, Any] = {PROP_SWITCH: 1}
+            requested_brightness = kwargs.get(ATTR_BRIGHTNESS)
+            requested_hs = kwargs.get(ATTR_HS_COLOR)
 
-            if ATTR_BRIGHTNESS in kwargs:
-                ha_b = int(kwargs[ATTR_BRIGHTNESS])
-                items[PROP_BRIGHTNESS] = self._ha_to_aigo_brightness(ha_b)
+            if requested_hs is not None:
+                hue, saturation = requested_hs
+                ha_b = int(requested_brightness) if requested_brightness is not None else self._brightness
+                items[PROP_HSV_COLOR] = {
+                    "Hue": max(0, min(360, round(float(hue)))),
+                    "Saturation": max(0, min(100, round(float(saturation)))),
+                    "Value": self._ha_to_aigo_brightness(ha_b),
+                }
+                items[PROP_LIGHT_MODE] = 1
+                self._hs_color = (float(hue), float(saturation))
+                self._color_mode = ColorMode.HS
+                self._brightness = ha_b
+
+            elif requested_brightness is not None:
+                ha_b = int(requested_brightness)
+                if self._color_mode == ColorMode.HS:
+                    items[PROP_HSV_COLOR] = {
+                        "Hue": max(0, min(360, round(self._hs_color[0]))),
+                        "Saturation": max(0, min(100, round(self._hs_color[1]))),
+                        "Value": self._ha_to_aigo_brightness(ha_b),
+                    }
+                    items[PROP_LIGHT_MODE] = 1
+                else:
+                    items[PROP_BRIGHTNESS] = self._ha_to_aigo_brightness(ha_b)
                 self._brightness = ha_b
 
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
@@ -199,6 +245,7 @@ class AigostarLight(LightEntity):
                 items[PROP_COLOR_TEMP] = self._kelvin_to_aigo(k)
                 items[PROP_LIGHT_MODE] = 0  # white mode
                 self._color_temp_k = k
+                self._color_mode = ColorMode.COLOR_TEMP
 
             self._client.set_properties_sync(items)
             self._is_on     = True
