@@ -21,6 +21,7 @@ PROP_SWITCH     = "LightSwitch"       # bool  0=off 1=on
 PROP_BRIGHTNESS = "Brightness"        # int   1-100 (percentage)
 PROP_COLOR_TEMP = "ColorTemperature"  # int   0-100 (0=warm 2700K, 100=cool 6500K)
 PROP_LIGHT_MODE = "LightMode"         # enum  0=white 1=color(RGB)
+PROP_HSV_COLOR  = "HSVColor"          # struct {Hue:0-360, Saturation:0-100, Value:0-100}
 
 # Kelvin <-> Aigostar percentage conversion
 KELVIN_WARM = 2700   # ColorTemperature = 0
