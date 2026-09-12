@@ -42,6 +42,7 @@ from .const import (
     KELVIN_COOL,
     KELVIN_WARM,
     LIGHT_MODE_COLOR,
+    LIGHT_MODE_WHITE,
     PROP_BRIGHTNESS,
     PROP_COLOR_TEMP,
     PROP_HSV_COLOR,
@@ -329,45 +330,73 @@ class AigostarLight(LightEntity):
     # Commands
     # ------------------------------------------------------------------
 
+    def _light_mode_value(self) -> int:
+        """LightMode matching the colour mode we currently believe in."""
+        return LIGHT_MODE_COLOR if self._color_mode == ColorMode.HS else LIGHT_MODE_WHITE
+
+    def _hsv_item(self, hue: float, saturation: float, ha_brightness: int) -> dict[str, int]:
+        return {
+            HSV_KEY_HUE:        max(0, min(AIGO_HUE_MAX, round(hue))),
+            HSV_KEY_SATURATION: max(0, min(AIGO_SAT_MAX, round(saturation))),
+            HSV_KEY_VALUE:      self._ha_to_aigo_brightness(ha_brightness),
+        }
+
+    def _write_state(self) -> None:
+        """Publish the optimistic state so the UI does not snap back."""
+        if self.hass is not None and self.entity_id:
+            self.schedule_update_ha_state()
+
     def turn_on(self, **kwargs: Any) -> None:
         try:
             items: dict[str, Any] = {PROP_SWITCH: 1}
             requested_brightness = kwargs.get(ATTR_BRIGHTNESS)
             requested_hs = kwargs.get(ATTR_HS_COLOR)
+            requested_kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
+            ha_b = (
+                int(requested_brightness) if requested_brightness is not None
+                else self._brightness
+            )
 
-            if requested_hs is not None:
-                hue, saturation = requested_hs
-                ha_b = int(requested_brightness) if requested_brightness is not None else self._brightness
-                items[PROP_HSV_COLOR] = {
-                    "Hue": max(0, min(360, round(float(hue)))),
-                    "Saturation": max(0, min(100, round(float(saturation)))),
-                    "Value": self._ha_to_aigo_brightness(ha_b),
-                }
-                items[PROP_LIGHT_MODE] = 1
-                self._hs_color = (float(hue), float(saturation))
-                self._color_mode = ColorMode.HS
-                self._brightness = ha_b
-
-            elif requested_brightness is not None:
-                ha_b = int(requested_brightness)
-                if self._color_mode == ColorMode.HS:
-                    items[PROP_HSV_COLOR] = {
-                        "Hue": max(0, min(360, round(self._hs_color[0]))),
-                        "Saturation": max(0, min(100, round(self._hs_color[1]))),
-                        "Value": self._ha_to_aigo_brightness(ha_b),
-                    }
-                    items[PROP_LIGHT_MODE] = 1
-                else:
-                    items[PROP_BRIGHTNESS] = self._ha_to_aigo_brightness(ha_b)
-                self._brightness = ha_b
-
-            if ATTR_COLOR_TEMP_KELVIN in kwargs:
-                k = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
+            # The bulb holds a single LightMode, so colour temperature and
+            # colour are mutually exclusive. When HA sends both in one call
+            # colour temperature wins and the HS part is dropped; sending both
+            # property sets would leave the result up to the firmware.
+            if requested_kelvin is not None:
+                k = int(requested_kelvin)
                 items[PROP_COLOR_TEMP] = self._kelvin_to_aigo(k)
-                items[PROP_LIGHT_MODE] = 0  # white mode
+                items[PROP_LIGHT_MODE] = LIGHT_MODE_WHITE
+                if requested_brightness is not None:
+                    items[PROP_BRIGHTNESS] = self._ha_to_aigo_brightness(ha_b)
                 self._color_temp_k = k
                 self._color_mode = ColorMode.COLOR_TEMP
 
+            elif requested_hs is not None:
+                hue, saturation = requested_hs
+                items[PROP_HSV_COLOR] = self._hsv_item(float(hue), float(saturation), ha_b)
+                items[PROP_LIGHT_MODE] = LIGHT_MODE_COLOR
+                self._hs_color = (float(hue), float(saturation))
+                self._color_mode = ColorMode.HS
+
+            elif requested_brightness is not None:
+                if self._color_mode == ColorMode.HS and self._hs_color[1] > 0:
+                    items[PROP_HSV_COLOR] = self._hsv_item(self._hs_color[0], self._hs_color[1], ha_b)
+                    items[PROP_LIGHT_MODE] = LIGHT_MODE_COLOR
+                else:
+                    # White mode, or colour mode with a colour we never learned
+                    # (saturation 0 would wash the bulb out): drive the plain
+                    # Brightness property and leave LightMode untouched.
+                    items[PROP_BRIGHTNESS] = self._ha_to_aigo_brightness(ha_b)
+
+            else:
+                # Plain switch-on: re-assert the mode we believe the bulb is in,
+                # otherwise it returns in whatever mode the cloud kept and the
+                # HA state drifts away from reality.
+                items[PROP_LIGHT_MODE] = self._light_mode_value()
+
+            if requested_brightness is not None:
+                self._brightness = ha_b
+
+            _LOGGER.debug("Aigostar [%s] turn_on items: %s", self._attr_unique_id, items)
             self._client.set_properties_sync(items)
             self._is_on     = True
             self._available = True
@@ -375,12 +404,18 @@ class AigostarLight(LightEntity):
         except Exception as exc:
             _LOGGER.error("Aigostar turn_on failed [%s]: %s", self._attr_unique_id, exc)
             self._available = False
+        finally:
+            self._write_state()
 
     def turn_off(self, **kwargs: Any) -> None:
         try:
-            self._client.set_properties_sync({PROP_SWITCH: 0})
+            items = {PROP_SWITCH: 0}
+            _LOGGER.debug("Aigostar [%s] turn_off items: %s", self._attr_unique_id, items)
+            self._client.set_properties_sync(items)
             self._is_on     = False
             self._available = True
         except Exception as exc:
             _LOGGER.error("Aigostar turn_off failed [%s]: %s", self._attr_unique_id, exc)
             self._available = False
+        finally:
+            self._write_state()
