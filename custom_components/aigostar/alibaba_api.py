@@ -30,6 +30,9 @@ BASE_URL     = "https://eu-central-1.api-iot.aliyuncs.com"
 PATH_GET     = "/thing/properties/get"
 PATH_SET     = "/thing/properties/set"
 PATH_DEVICES = "/uc/listBindingByAccount"
+# Each property in a /thing/properties/get response is {"value": x, "time": ms}
+FIELD_VALUE  = "value"
+FIELD_TIME   = "time"
 PATH_CREATE_SESSION = "/account/createSessionByAuthCode"
 PATH_REFRESH = "/account/checkOrRefreshSession"
 CONTENT_TYPE = "application/json; charset=UTF-8"
@@ -566,12 +569,32 @@ class AlibabaIoTClient:
         self.app_secret = app_secret
 
     def get_properties_sync(self) -> dict:
+        values, _ = self.get_properties_with_time_sync()
+        return values
+
+    def get_properties_with_time_sync(self) -> tuple[dict, dict]:
+        """
+        Property values plus the cloud timestamp of each one.
+
+        The gateway answers with a per-property cache, so entries can be hours
+        apart in age. The timestamps (epoch milliseconds) are what makes a
+        reported value comparable against a command we sent ourselves.
+        """
         result = _call_sync(
             PATH_GET, {"iotId": self.iot_id},
             self.app_key, self.app_secret, self.iot_token,
         )
         data = result.get("data", {})
-        return {k: v["value"] for k, v in data.items() if isinstance(v, dict) and "value" in v}
+        values: dict[str, Any] = {}
+        times: dict[str, int] = {}
+        for key, entry in data.items():
+            if not isinstance(entry, dict) or FIELD_VALUE not in entry:
+                continue
+            values[key] = entry[FIELD_VALUE]
+            stamp = entry.get(FIELD_TIME)
+            if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+                times[key] = int(stamp)
+        return values, times
 
     def set_properties_sync(self, items: dict) -> None:
         _call_sync(

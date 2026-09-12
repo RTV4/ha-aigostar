@@ -35,7 +35,8 @@ from .const import (
     AIGO_HUE_MAX,
     AIGO_SAT_MAX,
     COLOR_MODEL_HINTS,
-    COMMAND_SETTLE_SECONDS,
+    COMMAND_ECHO_TOLERANCE_SECONDS,
+    COMMAND_TRUST_MAX_SECONDS,
     DOMAIN,
     HA_BRIGHT_MAX,
     HSV_KEY_HUE,
@@ -91,6 +92,16 @@ async def async_setup_entry(
     async_add_entities(entities, update_before_add=True)
 
 
+def _same_reported_value(written: Any, reported: Any) -> bool:
+    """Whether a reported value is the one we wrote (numbers may arrive as strings)."""
+    if isinstance(written, dict) and isinstance(reported, dict):
+        return all(_same_reported_value(v, reported.get(k)) for k, v in written.items())
+    try:
+        return float(written) == float(reported)
+    except (TypeError, ValueError):
+        return written == reported
+
+
 class AigostarLight(LightEntity):
     """Aigostar smart bulb."""
 
@@ -124,7 +135,9 @@ class AigostarLight(LightEntity):
         self._color_mode:   ColorMode = ColorMode.COLOR_TEMP
         self._hs_color:     tuple[float, float] = (0.0, 0.0)
         self._available:    bool = online
-        self._last_command: float | None = None
+        # Property name -> (epoch time we wrote it, value we wrote), dropped
+        # again once the cloud confirms it or reports something newer.
+        self._written:      dict[str, tuple[float, Any]] = {}
 
         # Colour capability is per device: a CCT-only bulb must not show a
         # colour wheel in the UI. Start white-only (the historical behaviour)
@@ -274,16 +287,20 @@ class AigostarLight(LightEntity):
             )
         return None
 
-    def _apply_props(self, props: dict) -> None:
+    def _apply_props(self, props: dict, times: dict | None = None) -> None:
         _LOGGER.debug("Aigostar [%s] props: %s", self._attr_unique_id, props)
 
         # Entities are added with update_before_add=True, so the first poll
         # lands here before HA reads supported_color_modes. Never downgrade a
-        # bulb that already proved it can do colour.
+        # bulb that already proved it can do colour. Capability detection asks
+        # which keys the device exposes at all, so it runs on the untouched
+        # snapshot, before stale values are dropped below.
         if self._color_support is not True:
             support = self._detect_color_support(props)
             if support is not None:
                 self._set_color_support(support)
+
+        props = {k: v for k, v in props.items() if self._accepts(k, v, times or {})}
 
         if PROP_SWITCH in props:
             self._is_on = bool(props[PROP_SWITCH])
@@ -322,28 +339,68 @@ class AigostarLight(LightEntity):
             if color_temp is not None:
                 self._color_temp_k = self._aigo_to_kelvin(int(color_temp))
 
-    def _command_settling(self) -> bool:
-        """True while the cloud may still report the pre-command state."""
-        return (
-            self._last_command is not None
-            and (time.monotonic() - self._last_command) < COMMAND_SETTLE_SECONDS
+    def _mark_written(self, items: dict) -> None:
+        """Remember what we just wrote, so a stale report cannot undo it."""
+        now = time.time()
+        for key, value in items.items():
+            self._written[key] = (now, value)
+        hsv = items.get(PROP_HSV_COLOR)
+        if isinstance(hsv, dict):
+            # The bulb mirrors HSVColor.Value into Brightness, so that report
+            # carries the same delay even though we never wrote Brightness.
+            self._written[PROP_BRIGHTNESS] = (now, hsv.get(HSV_KEY_VALUE))
+
+    def _accepts(self, key: str, value: Any, times: dict) -> bool:
+        """
+        Whether a reported value may overwrite what we last commanded.
+
+        HA forces a refresh right after every service call, and the gateway then
+        still serves the pre-command value — or, a second or two later, the echo
+        of an even earlier command. Both would make the UI snap back. A report
+        that carries the value we wrote is our confirmation; one that disagrees
+        has to be measurably newer than our write before it is believed.
+        """
+        pending = self._written.get(key)
+        if pending is None:
+            return True
+
+        written_at, written_value = pending
+        if _same_reported_value(written_value, value):
+            self._written.pop(key, None)
+            return True
+
+        now = time.time()
+        if (now - written_at) > COMMAND_TRUST_MAX_SECONDS:
+            _LOGGER.debug(
+                "Aigostar [%s] %s never confirmed, trusting the cloud again",
+                self._attr_unique_id, key,
+            )
+            self._written.pop(key, None)
+            return True
+
+        stamp = times.get(key)
+        if stamp is None:
+            # Nothing to compare against: fall back to a short grace period.
+            if (now - written_at) < COMMAND_ECHO_TOLERANCE_SECONDS:
+                return False
+            self._written.pop(key, None)
+            return True
+
+        if (stamp / 1000.0) >= (written_at + COMMAND_ECHO_TOLERANCE_SECONDS):
+            self._written.pop(key, None)
+            return True
+
+        _LOGGER.debug(
+            "Aigostar [%s] ignoring %s=%s reported %+.3f s from our write of %s",
+            self._attr_unique_id, key, value,
+            stamp / 1000.0 - written_at, written_value,
         )
+        return False
 
     def update(self) -> None:
-        # HA forces a refresh right after every service call, and the cloud needs
-        # several seconds to report what we just wrote. Polling in that window
-        # would overwrite the command with the stale state and make the UI snap
-        # back, so the command wins until the cloud catches up.
-        if self._command_settling():
-            _LOGGER.debug(
-                "Aigostar [%s] poll skipped, command still settling",
-                self._attr_unique_id,
-            )
-            return
-
         try:
-            props = self._client.get_properties_sync()
-            self._apply_props(props)
+            props, times = self._client.get_properties_with_time_sync()
+            self._apply_props(props, times)
             self._available = True
         except Exception as exc:
             _LOGGER.warning("Aigostar [%s] update failed: %s", self._attr_unique_id, exc)
@@ -421,9 +478,9 @@ class AigostarLight(LightEntity):
 
             _LOGGER.debug("Aigostar [%s] turn_on items: %s", self._attr_unique_id, items)
             self._client.set_properties_sync(items)
-            self._is_on        = True
-            self._available    = True
-            self._last_command = time.monotonic()
+            self._mark_written(items)
+            self._is_on     = True
+            self._available = True
 
         except Exception as exc:
             _LOGGER.error("Aigostar turn_on failed [%s]: %s", self._attr_unique_id, exc)
@@ -436,9 +493,9 @@ class AigostarLight(LightEntity):
             items = {PROP_SWITCH: 0}
             _LOGGER.debug("Aigostar [%s] turn_off items: %s", self._attr_unique_id, items)
             self._client.set_properties_sync(items)
-            self._is_on        = False
-            self._available    = True
-            self._last_command = time.monotonic()
+            self._mark_written(items)
+            self._is_on     = False
+            self._available = True
         except Exception as exc:
             _LOGGER.error("Aigostar turn_off failed [%s]: %s", self._attr_unique_id, exc)
             self._available = False

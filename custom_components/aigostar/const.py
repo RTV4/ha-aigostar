@@ -51,7 +51,13 @@ AIGO_BRIGHT_MAX = 100
 
 SCAN_INTERVAL_SECONDS = 30
 
-# The cloud reports a value we just wrote only after a few seconds. Ignore polls
-# for this long after a successful command so the fresh command wins over the
-# stale cloud state instead of the UI snapping back.
-COMMAND_SETTLE_SECONDS = 15
+# The gateway serves a per-property cache and a device report lands in it a
+# couple of seconds after the fact, so a value stamped around the time of our
+# own write is the echo of an earlier command, not a confirmation of ours.
+# Believe a reported value only once it is this much newer than our write.
+COMMAND_ECHO_TOLERANCE_SECONDS = 3
+
+# A command is not always reported back at all (a bulb can apply it and stay
+# silent). Hold an unconfirmed value for at most this long, then trust the
+# cloud again rather than showing a state nothing ever confirmed.
+COMMAND_TRUST_MAX_SECONDS = 300
