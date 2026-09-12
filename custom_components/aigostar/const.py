@@ -23,6 +23,23 @@ PROP_COLOR_TEMP = "ColorTemperature"  # int   0-100 (0=warm 2700K, 100=cool 6500
 PROP_LIGHT_MODE = "LightMode"         # enum  0=white 1=color(RGB)
 PROP_HSV_COLOR  = "HSVColor"          # struct {Hue:0-360, Saturation:0-100, Value:0-100}
 
+# LightMode values
+LIGHT_MODE_WHITE = 0
+LIGHT_MODE_COLOR = 1
+
+# HSVColor struct members
+HSV_KEY_HUE        = "Hue"
+HSV_KEY_SATURATION = "Saturation"
+HSV_KEY_VALUE      = "Value"
+
+# HSVColor ranges
+AIGO_HUE_MAX = 360
+AIGO_SAT_MAX = 100
+
+# Product name/key fragments that identify a colour-capable (RGBCCT) bulb.
+# Used only as a hint when the property snapshot does not reveal HSVColor.
+COLOR_MODEL_HINTS = ("rgb", "color", "colour")
+
 # Kelvin <-> Aigostar percentage conversion
 KELVIN_WARM = 2700   # ColorTemperature = 0
 KELVIN_COOL = 6500   # ColorTemperature = 100

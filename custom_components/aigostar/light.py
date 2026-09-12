@@ -10,6 +10,7 @@ Supported TSL properties (TG7100C):
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
 from typing import Any
@@ -30,10 +31,16 @@ from .alibaba_api import AlibabaIoTClient
 from .const import (
     AIGO_BRIGHT_MAX,
     AIGO_BRIGHT_MIN,
+    AIGO_HUE_MAX,
+    AIGO_SAT_MAX,
     DOMAIN,
     HA_BRIGHT_MAX,
+    HSV_KEY_HUE,
+    HSV_KEY_SATURATION,
+    HSV_KEY_VALUE,
     KELVIN_COOL,
     KELVIN_WARM,
+    LIGHT_MODE_COLOR,
     PROP_BRIGHTNESS,
     PROP_COLOR_TEMP,
     PROP_HSV_COLOR,
@@ -176,24 +183,76 @@ class AigostarLight(LightEntity):
     # Update (polling)
     # ------------------------------------------------------------------
 
+    def _to_number(self, key: str, value: Any) -> float | None:
+        """Cloud values may be strings, None or garbage — never let that raise."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            _LOGGER.debug(
+                "Aigostar [%s] ignoring non-numeric %s: %r",
+                self._attr_unique_id, key, value,
+            )
+            return None
+
+    def _parse_hsv(self, value: Any) -> dict | None:
+        """HSVColor arrives either as a struct or as a JSON-encoded string."""
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                _LOGGER.debug(
+                    "Aigostar [%s] cannot decode %s: %r",
+                    self._attr_unique_id, PROP_HSV_COLOR, value,
+                )
+                return None
+            if isinstance(decoded, dict):
+                return decoded
+        if value is not None:
+            _LOGGER.debug(
+                "Aigostar [%s] unexpected %s payload: %r",
+                self._attr_unique_id, PROP_HSV_COLOR, value,
+            )
+        return None
+
     def _apply_props(self, props: dict) -> None:
+        _LOGGER.debug("Aigostar [%s] props: %s", self._attr_unique_id, props)
+
         if PROP_SWITCH in props:
             self._is_on = bool(props[PROP_SWITCH])
-        mode = int(props.get(PROP_LIGHT_MODE, 0))
-        self._color_mode = ColorMode.HS if mode == 1 else ColorMode.COLOR_TEMP
 
-        hsv = props.get(PROP_HSV_COLOR)
-        if isinstance(hsv, dict):
-            hue = max(0.0, min(360.0, float(hsv.get("Hue", 0))))
-            saturation = max(0.0, min(100.0, float(hsv.get("Saturation", 0))))
-            self._hs_color = (hue, saturation)
+        # Follow the reported mode only when the key is really there: a partial
+        # response must not silently push the bulb back into white mode.
+        if PROP_LIGHT_MODE in props:
+            mode = self._to_number(PROP_LIGHT_MODE, props[PROP_LIGHT_MODE])
+            if mode is not None:
+                self._color_mode = (
+                    ColorMode.HS if int(mode) == LIGHT_MODE_COLOR else ColorMode.COLOR_TEMP
+                )
 
-        if self._color_mode == ColorMode.HS and isinstance(hsv, dict):
-            self._brightness = self._aigo_to_ha_brightness(int(hsv.get("Value", 100)))
+        hsv = self._parse_hsv(props.get(PROP_HSV_COLOR))
+        hsv_value: float | None = None
+        if hsv is not None:
+            hue = self._to_number(HSV_KEY_HUE, hsv.get(HSV_KEY_HUE))
+            saturation = self._to_number(HSV_KEY_SATURATION, hsv.get(HSV_KEY_SATURATION))
+            if hue is not None and saturation is not None:
+                self._hs_color = (
+                    max(0.0, min(float(AIGO_HUE_MAX), hue)),
+                    max(0.0, min(float(AIGO_SAT_MAX), saturation)),
+                )
+            hsv_value = self._to_number(HSV_KEY_VALUE, hsv.get(HSV_KEY_VALUE))
+
+        if self._color_mode == ColorMode.HS and hsv_value is not None:
+            self._brightness = self._aigo_to_ha_brightness(int(hsv_value))
         elif PROP_BRIGHTNESS in props:
-            self._brightness = self._aigo_to_ha_brightness(int(props[PROP_BRIGHTNESS]))
+            brightness = self._to_number(PROP_BRIGHTNESS, props[PROP_BRIGHTNESS])
+            if brightness is not None:
+                self._brightness = self._aigo_to_ha_brightness(int(brightness))
         if PROP_COLOR_TEMP in props:
-            self._color_temp_k = self._aigo_to_kelvin(int(props[PROP_COLOR_TEMP]))
+            color_temp = self._to_number(PROP_COLOR_TEMP, props[PROP_COLOR_TEMP])
+            if color_temp is not None:
+                self._color_temp_k = self._aigo_to_kelvin(int(color_temp))
 
     def update(self) -> None:
         try:
