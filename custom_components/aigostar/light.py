@@ -217,16 +217,18 @@ class AigostarLight(LightEntity):
         return self._brightness
 
     @property
-    def color_temp_kelvin(self) -> int:
-        return self._color_temp_k
+    def color_temp_kelvin(self) -> int | None:
+        """Only reported while the bulb is in white mode."""
+        return self._color_temp_k if self._color_mode == ColorMode.COLOR_TEMP else None
 
     @property
     def color_mode(self) -> ColorMode:
         return self._color_mode
 
     @property
-    def hs_color(self) -> tuple[float, float]:
-        return self._hs_color
+    def hs_color(self) -> tuple[float, float] | None:
+        """Only reported while the bulb is in colour mode."""
+        return self._hs_color if self._color_mode == ColorMode.HS else None
 
     @property
     def available(self) -> bool:
