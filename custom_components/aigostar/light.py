@@ -33,6 +33,7 @@ from .const import (
     AIGO_BRIGHT_MIN,
     AIGO_HUE_MAX,
     AIGO_SAT_MAX,
+    COLOR_MODEL_HINTS,
     DOMAIN,
     HA_BRIGHT_MAX,
     HSV_KEY_HUE,
@@ -92,7 +93,6 @@ class AigostarLight(LightEntity):
 
     _attr_has_entity_name = True
     _attr_name = None  # Use device name as entity name
-    _attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.HS}
     _attr_min_color_temp_kelvin = KELVIN_WARM
     _attr_max_color_temp_kelvin = KELVIN_COOL
 
@@ -122,9 +122,59 @@ class AigostarLight(LightEntity):
         self._hs_color:     tuple[float, float] = (0.0, 0.0)
         self._available:    bool = online
 
+        # Colour capability is per device: a CCT-only bulb must not show a
+        # colour wheel in the UI. Start white-only (the historical behaviour)
+        # and upgrade as soon as the device proves it supports colour.
+        self._model_hint = " ".join(
+            str(raw.get(key) or "")
+            for key in ("productName", "productKey", "categoryName")
+        ).lower()
+        self._color_support: bool | None = None
+        self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
+        if any(hint in self._model_hint for hint in COLOR_MODEL_HINTS):
+            # Optimistic guess from the product metadata; the first poll either
+            # confirms it or corrects it (the properties are the real proof).
+            self._attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.HS}
+
     def update_token(self, new_token: str) -> None:
         """Update the iotToken after a refresh."""
         self._client.iot_token = new_token
+
+    # ------------------------------------------------------------------
+    # Colour capability
+    # ------------------------------------------------------------------
+
+    @property
+    def _supports_hs(self) -> bool:
+        return ColorMode.HS in (self._attr_supported_color_modes or ())
+
+    def _set_color_support(self, supports_color: bool) -> None:
+        """Latch the detected capability into the supported colour modes."""
+        if self._color_support == supports_color:
+            return
+        self._color_support = supports_color
+        modes = {ColorMode.COLOR_TEMP}
+        if supports_color:
+            modes.add(ColorMode.HS)
+        self._attr_supported_color_modes = modes
+        _LOGGER.debug(
+            "Aigostar [%s] supported color modes: %s", self._attr_unique_id, modes,
+        )
+
+    def _detect_color_support(self, props: dict) -> bool | None:
+        """
+        Decide from a property snapshot whether the bulb can do colour.
+
+        Returns None when the snapshot is inconclusive, so the caller keeps the
+        safe COLOR_TEMP-only default. LightMode on its own is not a positive
+        signal — white-only TG7100C bulbs expose it too — but a snapshot that
+        carries it without HSVColor is solid proof of a white-only bulb.
+        """
+        if PROP_HSV_COLOR in props:
+            return True
+        if PROP_LIGHT_MODE in props or (PROP_SWITCH in props and PROP_BRIGHTNESS in props):
+            return False
+        return None
 
     # ------------------------------------------------------------------
     # Conversions
@@ -221,6 +271,14 @@ class AigostarLight(LightEntity):
     def _apply_props(self, props: dict) -> None:
         _LOGGER.debug("Aigostar [%s] props: %s", self._attr_unique_id, props)
 
+        # Entities are added with update_before_add=True, so the first poll
+        # lands here before HA reads supported_color_modes. Never downgrade a
+        # bulb that already proved it can do colour.
+        if self._color_support is not True:
+            support = self._detect_color_support(props)
+            if support is not None:
+                self._set_color_support(support)
+
         if PROP_SWITCH in props:
             self._is_on = bool(props[PROP_SWITCH])
 
@@ -230,7 +288,9 @@ class AigostarLight(LightEntity):
             mode = self._to_number(PROP_LIGHT_MODE, props[PROP_LIGHT_MODE])
             if mode is not None:
                 self._color_mode = (
-                    ColorMode.HS if int(mode) == LIGHT_MODE_COLOR else ColorMode.COLOR_TEMP
+                    ColorMode.HS
+                    if int(mode) == LIGHT_MODE_COLOR and self._supports_hs
+                    else ColorMode.COLOR_TEMP
                 )
 
         hsv = self._parse_hsv(props.get(PROP_HSV_COLOR))
