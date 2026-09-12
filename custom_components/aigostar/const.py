@@ -50,3 +50,8 @@ AIGO_BRIGHT_MIN = 1
 AIGO_BRIGHT_MAX = 100
 
 SCAN_INTERVAL_SECONDS = 30
+
+# The cloud reports a value we just wrote only after a few seconds. Ignore polls
+# for this long after a successful command so the fresh command wins over the
+# stale cloud state instead of the UI snapping back.
+COMMAND_SETTLE_SECONDS = 15

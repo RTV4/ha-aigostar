@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -34,6 +35,7 @@ from .const import (
     AIGO_HUE_MAX,
     AIGO_SAT_MAX,
     COLOR_MODEL_HINTS,
+    COMMAND_SETTLE_SECONDS,
     DOMAIN,
     HA_BRIGHT_MAX,
     HSV_KEY_HUE,
@@ -122,6 +124,7 @@ class AigostarLight(LightEntity):
         self._color_mode:   ColorMode = ColorMode.COLOR_TEMP
         self._hs_color:     tuple[float, float] = (0.0, 0.0)
         self._available:    bool = online
+        self._last_command: float | None = None
 
         # Colour capability is per device: a CCT-only bulb must not show a
         # colour wheel in the UI. Start white-only (the historical behaviour)
@@ -319,7 +322,25 @@ class AigostarLight(LightEntity):
             if color_temp is not None:
                 self._color_temp_k = self._aigo_to_kelvin(int(color_temp))
 
+    def _command_settling(self) -> bool:
+        """True while the cloud may still report the pre-command state."""
+        return (
+            self._last_command is not None
+            and (time.monotonic() - self._last_command) < COMMAND_SETTLE_SECONDS
+        )
+
     def update(self) -> None:
+        # HA forces a refresh right after every service call, and the cloud needs
+        # several seconds to report what we just wrote. Polling in that window
+        # would overwrite the command with the stale state and make the UI snap
+        # back, so the command wins until the cloud catches up.
+        if self._command_settling():
+            _LOGGER.debug(
+                "Aigostar [%s] poll skipped, command still settling",
+                self._attr_unique_id,
+            )
+            return
+
         try:
             props = self._client.get_properties_sync()
             self._apply_props(props)
@@ -400,8 +421,9 @@ class AigostarLight(LightEntity):
 
             _LOGGER.debug("Aigostar [%s] turn_on items: %s", self._attr_unique_id, items)
             self._client.set_properties_sync(items)
-            self._is_on     = True
-            self._available = True
+            self._is_on        = True
+            self._available    = True
+            self._last_command = time.monotonic()
 
         except Exception as exc:
             _LOGGER.error("Aigostar turn_on failed [%s]: %s", self._attr_unique_id, exc)
@@ -414,8 +436,9 @@ class AigostarLight(LightEntity):
             items = {PROP_SWITCH: 0}
             _LOGGER.debug("Aigostar [%s] turn_off items: %s", self._attr_unique_id, items)
             self._client.set_properties_sync(items)
-            self._is_on     = False
-            self._available = True
+            self._is_on        = False
+            self._available    = True
+            self._last_command = time.monotonic()
         except Exception as exc:
             _LOGGER.error("Aigostar turn_off failed [%s]: %s", self._attr_unique_id, exc)
             self._available = False
