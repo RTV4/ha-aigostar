@@ -132,13 +132,15 @@ class AigostarLight(LightEntity):
 
     @staticmethod
     def _aigo_to_ha_brightness(v: int) -> int:
+        v = max(AIGO_BRIGHT_MIN, min(AIGO_BRIGHT_MAX, v))
         pct = (v - AIGO_BRIGHT_MIN) / (AIGO_BRIGHT_MAX - AIGO_BRIGHT_MIN)
         return max(1, round(pct * HA_BRIGHT_MAX))
 
     @staticmethod
     def _ha_to_aigo_brightness(v: int) -> int:
-        pct = v / HA_BRIGHT_MAX
-        return max(AIGO_BRIGHT_MIN, min(AIGO_BRIGHT_MAX, round(pct * AIGO_BRIGHT_MAX)))
+        """Exact inverse of _aigo_to_ha_brightness, so a round-trip is stable."""
+        pct = max(0, min(HA_BRIGHT_MAX, v)) / HA_BRIGHT_MAX
+        return AIGO_BRIGHT_MIN + round(pct * (AIGO_BRIGHT_MAX - AIGO_BRIGHT_MIN))
 
     @staticmethod
     def _aigo_to_kelvin(v: int) -> int:
