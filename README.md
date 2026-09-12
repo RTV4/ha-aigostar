@@ -15,6 +15,7 @@ Control your Aigostar lights directly from Home Assistant — no local flashing 
 - **Automatic token refresh** — iotToken is renewed before expiration
 - **Brightness control** (1–100%)
 - **Color temperature** (2700K warm – 6500K cool)
+- **RGB color** (hue/saturation) on color-capable bulbs — capability is detected per device, so white-only bulbs keep a plain brightness/temperature UI
 - **Email verification** support (when the server requires a security code)
 - **Multilingual UI** — English and Italian translations included
 
@@ -22,7 +23,12 @@ Control your Aigostar lights directly from Home Assistant — no local flashing 
 
 | Device | Chipset | Protocol | Status |
 |--------|---------|----------|--------|
-| Aigostar smart bulb (E27/E14/GU10) | TG7100C (Bouffalo Lab) | AigoSmart | Tested |
+| Aigostar smart bulb, white/CCT (E27/E14/GU10) | TG7100C (Bouffalo Lab) | AigoSmart | Tested |
+| Aigostar smart bulb, RGBCCT (E27/E14/GU10) | TG7100C (Bouffalo Lab) | AigoSmart | Experimental |
+
+> RGBCCT bulbs are driven through the `HSVColor` property. Color support is
+> detected from the properties the bulb reports, so a white-only bulb is never
+> offered a color wheel.
 
 > Other Aigostar smart devices using the AigoSmart app may work but have not been tested.
 
