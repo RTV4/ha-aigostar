@@ -9,8 +9,6 @@
   "documentation": "https://github.com/MarcoM1993/ha-aigostar",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/MarcoM1993/ha-aigostar/issues",
-  "requirements": [
-    "cryptography>=41.0.0"
-  ],
+  "requirements": [],
   "version": "2.0.4"
 }
